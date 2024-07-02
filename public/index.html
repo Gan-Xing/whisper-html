@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>WebSocket Audio Transcription</title>
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.10.0/dist/ffmpeg.min.js"></script>
+</head>
+<body>
+    <button id="startRecording">开始录音</button>
+    <button id="stopRecording" disabled>停止录音</button>
+    <div id="transcriptionResult"></div>
+
+    <script>
+        const { createFFmpeg, fetchFile } = FFmpeg;
+        const ffmpeg = createFFmpeg({ log: true });
+
+        let mediaRecorder;
+        let audioChunks = [];
+
+        document.getElementById('startRecording').addEventListener('click', async () => {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+
+            mediaRecorder.ondataavailable = event => {
+                audioChunks.push(event.data);
+            };
+
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                audioChunks = [];
+                await processAndSendAudio(audioBlob);
+            };
+
+            mediaRecorder.start();
+            document.getElementById('startRecording').disabled = true;
+            document.getElementById('stopRecording').disabled = false;
+            document.getElementById('transcriptionResult').textContent = '录音中...';
+        });
+
+        document.getElementById('stopRecording').addEventListener('click', () => {
+            mediaRecorder.stop();
+            document.getElementById('startRecording').disabled = false;
+            document.getElementById('stopRecording').disabled = true;
+            document.getElementById('transcriptionResult').textContent = '处理中...';
+        });
+
+        async function processAndSendAudio(audioBlob) {
+            try {
+                if (!ffmpeg.isLoaded()) {
+                    console.log('加载 ffmpeg...');
+                    await ffmpeg.load();
+                }
+
+                console.log('转换音频文件为PCM格式...');
+                const audioArrayBuffer = await audioBlob.arrayBuffer();
+                ffmpeg.FS('writeFile', 'audio.wav', new Uint8Array(audioArrayBuffer));
+
+                await ffmpeg.run('-i', 'audio.wav', '-ac', '1', '-ar', '16000', '-f', 's16le', 'audio.pcm');
+
+                const pcmData = ffmpeg.FS('readFile', 'audio.pcm');
+
+                console.log('发送音频数据到WebSocket服务器...');
+                sendAudioToWebSocket(pcmData);
+            } catch (error) {
+                console.error('处理音频文件时出错:', error);
+                document.getElementById('transcriptionResult').textContent = '处理音频文件时出错: ' + error.message;
+            }
+        }
+
+        function sendAudioToWebSocket(pcmData) {
+            const ws = new WebSocket('ws://172.16.2.68:8000/v1/audio/transcriptions?model=Systran/faster-whisper-large-v3&language=zh');
+
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                console.log('WebSocket 连接已打开，开始发送数据...');
+                ws.send(pcmData);
+            };
+
+            ws.onmessage = (event) => {
+                const result = JSON.parse(event.data);
+                const transcriptionResultDiv = document.getElementById('transcriptionResult');
+                transcriptionResultDiv.textContent = result.text;
+                console.log('接收到转录结果:', result.text);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket 错误:', error);
+                document.getElementById('transcriptionResult').textContent = 'WebSocket 错误: ' + error.message;
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket 连接已关闭');
+                document.getElementById('transcriptionResult').textContent;
+            };
+        }
+    </script>
+</body>
+</html>
